@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <!-- 關鍵：禁止縮放，讓它看起來像 App -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    
+    <!-- iOS PWA 專用設定 -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="CNN教學">
+    
+    <title>CNN 手寫辨識教學</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;500;700&family=Roboto+Mono:wght@500&display=swap" rel="stylesheet">
+
+    <style>
+        /* CSS reset & iOS 優化 */
+        * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; touch-action: manipulation; }
+        
+        :root {
+            --bg: #121212; --card-bg: #1e1e1e; --accent: #4cc9f0; 
+            --accent-glow: rgba(76, 201, 240, 0.4); --text-main: #e0e0e0; --text-sub: #a0a0a0;
+        }
+
+        body {
+            font-family: 'Noto Sans TC', sans-serif;
+            background: var(--bg); color: var(--text-main);
+            margin: 0; padding: 20px 10px; /* 減少邊距適應 iPad */
+            display: flex; flex-direction: column; align-items: center;
+            min-height: 100vh;
+            padding-top: env(safe-area-inset-top); /* 避開瀏海/狀態列 */
+        }
+
+        h1 { margin: 10px 0 5px 0; color: #fff; text-align: center; font-size: 1.8rem;}
+        .subtitle { color: var(--text-sub); margin-bottom: 20px; font-size: 0.9rem; text-align: center;}
+
+        .pipeline { display: flex; flex-direction: column; align-items: center; width: 100%; max-width: 700px; padding-bottom: 50px;}
+
+        .stage {
+            background: var(--card-bg); border: 1px solid #333; border-radius: 16px;
+            padding: 20px; width: 100%; margin-bottom: 0; position: relative;
+            display: flex; flex-direction: row; align-items: flex-start; gap: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        
+        /* iPad 直向時自動切換佈局 */
+        @media (max-width: 768px) {
+            .stage { flex-direction: column; align-items: center; }
+            .stage-vis { width: 100%; }
+            .stage-info { width: 100%; text-align: center; }
+            .stage-title { justify-content: center; }
+        }
+
+        .stage-info { flex: 1; }
+        .stage-title { font-size: 1.1rem; font-weight: 700; color: var(--accent); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+        .stage-desc { font-size: 0.85rem; color: var(--text-sub); line-height: 1.5; }
+
+        .stage-vis {
+            flex: 0 0 280px; display: flex; flex-direction: column; align-items: center;
+            background: rgba(0,0,0,0.3); border-radius: 12px; padding: 15px;
+        }
+
+        .connector {
+            width: 2px; height: 30px; 
+            background: linear-gradient(to bottom, #333 0%, var(--accent) 50%, #333 100%);
+            margin: 5px 0;
+        }
+
+        /* 畫布設定 - 禁止拖動頁面 */
+        canvas#drawCanvas { 
+            background: #000; border: 2px solid #555; border-radius: 8px; 
+            touch-action: none; /* 關鍵：防止畫圖時捲動頁面 */
+        }
+        
+        .controls { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 10px; width: 100%; }
+        .btn-train {
+            background: #333; color: #fff; border: 1px solid #555; padding: 12px 0; /* 加大按鈕好按 */
+            border-radius: 8px; font-size: 1.1rem; font-weight: bold;
+        }
+        .btn-train:active { background: var(--accent); color: #000; }
+
+        .grid-maps { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; }
+        .feature-map { width: 50px; height: 50px; image-rendering: pixelated; border: 1px solid #444; background: #000; }
+
+        .bar-chart { width: 100%; display: flex; flex-direction: column; gap: 4px; }
+        .bar-row { display: flex; align-items: center; font-size: 0.8rem; }
+        .bar-bg { flex: 1; height: 8px; background: #333; margin-left: 10px; border-radius: 4px; overflow: hidden; }
+        .bar-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.2s; }
+        
+        .pred-badge { font-size: 3rem; color: var(--accent); font-weight: bold; font-family: monospace; }
+        
+        #loading { position: fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.95); display:flex; justify-content:center; align-items:center; z-index:9999; flex-direction: column;}
+    </style>
+</head>
+<body>
+
+    <div id="loading">
+        <h2 style="color:var(--accent)">啟動中...</h2>
+        <p style="color:#888">正在載入 AI 核心</p>
+    </div>
+
+    <h1>CNN 原理教學</h1>
+    <div class="subtitle">請畫一個數字，並點擊按鈕教導 AI</div>
+
+    <div class="pipeline">
+        <!-- 1. 輸入 -->
+        <div class="stage">
+            <div class="stage-info">
+                <div class="stage-title"><i class="ph-fill ph-pencil-circle"></i> 1. 輸入與教學</div>
+                <div class="stage-desc">在下方畫圖，然後點擊對應的數字按鈕。</div>
+                <div class="controls">
+                    <button class="btn-train" onclick="train(0)">0</button>
+                    <button class="btn-train" onclick="train(1)">1</button>
+                    <button class="btn-train" onclick="train(2)">2</button>
+                    <button class="btn-train" onclick="train(3)">3</button>
+                    <button class="btn-train" onclick="train(4)">4</button>
+                    <button class="btn-train" onclick="train(5)">5</button>
+                    <button class="btn-train" onclick="train(6)">6</button>
+                    <button class="btn-train" onclick="train(7)">7</button>
+                    <button class="btn-train" onclick="train(8)">8</button>
+                    <button class="btn-train" onclick="train(9)">9</button>
+                </div>
+                <button onclick="clearCanvas()" style="margin-top:15px; width:100%; padding:12px; background:#333; border:1px solid #555; color:#ccc; border-radius:8px; font-size:1rem;">清除畫布</button>
+            </div>
+            <div class="stage-vis">
+                <canvas id="drawCanvas" width="280" height="280"></canvas>
+            </div>
+        </div>
+
+        <div class="connector"></div>
+
+        <!-- 2. 卷積 -->
+        <div class="stage">
+            <div class="stage-info">
+                <div class="stage-title"><i class="ph-fill ph-selection-foreground"></i> 2. 卷積層 (特徵)</div>
+                <div class="stage-desc">AI 看到的 8 種特徵圖 (Filters)。亮點代表偵測到邊緣或線條。</div>
+            </div>
+            <div class="stage-vis">
+                <div id="conv-vis" class="grid-maps"></div>
+            </div>
+        </div>
+
+        <div class="connector"></div>
+
+        <!-- 3. 池化 -->
+        <div class="stage">
+            <div class="stage-info">
+                <div class="stage-title"><i class="ph-fill ph-arrows-in"></i> 3. 池化層 (縮小)</div>
+                <div class="stage-desc">保留最明顯的特徵並縮小圖片，加快運算。</div>
+            </div>
+            <div class="stage-vis">
+                <div id="pool-vis" class="grid-maps"></div>
+            </div>
+        </div>
+
+        <div class="connector"></div>
+
+        <!-- 4. 輸出 -->
+        <div class="stage">
+            <div class="stage-info">
+                <div class="stage-title"><i class="ph-fill ph-brain"></i> 4. 判斷結果</div>
+                <div class="stage-desc">AI 大腦計算出的最終機率分佈。</div>
+            </div>
+            <div class="stage-vis" style="flex-direction: row; justify-content: space-around; width: 100%;">
+                <div class="pred-badge" id="result-num">?</div>
+                <div class="bar-chart" id="chart-container" style="flex:1; max-width: 150px;"></div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    let model, canvas, ctx;
+    let isDrawing = false;
+
+    window.onload = async () => {
+        initCanvas();
+        initChart();
+        model = createEduModel();
+        await visualizeLayers(tf.zeros([1, 28, 28, 1]));
+        document.getElementById('loading').style.display = 'none';
+    };
+
+    function createEduModel() {
+        const m = tf.sequential();
+        m.add(tf.layers.conv2d({inputShape: [28, 28, 1], kernelSize: 3, filters: 8, activation: 'relu', name: 'conv_layer'}));
+        m.add(tf.layers.maxPooling2d({poolSize: 2, strides: 2, name: 'pool_layer'}));
+        m.add(tf.layers.flatten());
+        m.add(tf.layers.dense({units: 64, activation: 'relu'}));
+        m.add(tf.layers.dense({units: 10, activation: 'softmax'}));
+        m.compile({optimizer: tf.train.adam(0.02), loss: 'categoricalCrossentropy', metrics: ['accuracy']});
+        return m;
+    }
+
+    async function train(label) {
+        if(!checkCanvasNotEmpty()) { alert("請先畫圖！"); return; }
+        const x = getTensor();
+        const y = tf.tidy(() => tf.oneHot(tf.tensor1d([label], 'int32'), 10));
+        await model.fit(x, y, {epochs: 1, batchSize: 1});
+        await predictAndVisualize(x);
+        x.dispose(); y.dispose();
+    }
+
+    async function predictAndVisualize(inputTensor) {
+        const result = model.predict(inputTensor);
+        const data = await result.data();
+        document.getElementById('result-num').innerText = result.argMax(1).dataSync()[0];
+        updateChart(data);
+        await visualizeLayers(inputTensor);
+        result.dispose();
+    }
+
+    async function visualizeLayers(inputTensor) {
+        const visModel = tf.model({
+            inputs: model.input,
+            outputs: [model.getLayer('conv_layer').output, model.getLayer('pool_layer').output]
+        });
+        const [convOut, poolOut] = visModel.predict(inputTensor);
+        await drawMaps(convOut, 'conv-vis', 3);
+        await drawMaps(poolOut, 'pool-vis', 4);
+        convOut.dispose(); poolOut.dispose();
+    }
+
+    async function drawMaps(tensor, id, scale) {
+        const data = await tensor.data();
+        const [b, h, w, filters] = tensor.shape;
+        const container = document.getElementById(id);
+        container.innerHTML = '';
+        for(let f=0; f<filters; f++) {
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h; c.className = 'feature-map';
+            c.style.width = `${w*scale}px`; c.style.height = `${h*scale}px`;
+            const cx = c.getContext('2d');
+            const img = cx.createImageData(w, h);
+            for(let i=0; i<h*w; i++) {
+                const val = Math.min(255, data[i*filters+f]*255*2);
+                img.data[i*4]=val; img.data[i*4+1]=val; img.data[i*4+2]=val; img.data[i*4+3]=255;
+            }
+            cx.putImageData(img, 0, 0);
+            container.appendChild(c);
+        }
+    }
+
+    function initCanvas() {
+        canvas = document.getElementById('drawCanvas');
+        ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'black'; ctx.fillRect(0,0,280,280);
+        ctx.strokeStyle = 'white'; ctx.lineWidth = 25; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; // 加粗筆畫適合手指
+
+        // 處理觸控事件 (防止捲動)
+        const getPos = (e) => {
+            const r = canvas.getBoundingClientRect();
+            // 判斷是滑鼠還是觸控
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return {x: clientX - r.left, y: clientY - r.top};
+        }
+
+        const start = (e) => { isDrawing=true; ctx.beginPath(); ctx.moveTo(getPos(e).x, getPos(e).y); e.preventDefault(); };
+        const move = (e) => {
+            if(!isDrawing) return;
+            const pos = getPos(e);
+            ctx.lineTo(pos.x, pos.y); ctx.stroke();
+            e.preventDefault(); 
+        };
+        const end = (e) => { isDrawing=false; e.preventDefault(); };
+
+        canvas.addEventListener('mousedown', start);
+        canvas.addEventListener('mousemove', move);
+        canvas.addEventListener('mouseup', end);
+        
+        // 關鍵：Passive false 允許 preventDefault 阻止 iPad 捲動畫面
+        canvas.addEventListener('touchstart', start, {passive: false});
+        canvas.addEventListener('touchmove', move, {passive: false});
+        canvas.addEventListener('touchend', end, {passive: false});
+    }
+
+    function getTensor() {
+        return tf.tidy(() => tf.browser.fromPixels(canvas, 1).resizeNearestNeighbor([28, 28]).div(255.0).expandDims(0));
+    }
+
+    function clearCanvas() {
+        ctx.fillStyle = 'black'; ctx.fillRect(0,0,280,280);
+        document.getElementById('result-num').innerText = '?';
+        updateChart(new Array(10).fill(0));
+    }
+
+    function checkCanvasNotEmpty() {
+        const d = ctx.getImageData(0,0,280,280).data;
+        for(let i=0; i<d.length; i+=4) if(d[i]>50) return true;
+        return false;
+    }
+
+    function initChart() {
+        const c = document.getElementById('chart-container');
+        for(let i=0; i<=9; i++) c.innerHTML += `<div class="bar-row"><span style="width:10px">${i}</span><div class="bar-bg"><div id="bar-${i}" class="bar-fill"></div></div></div>`;
+    }
+    function updateChart(d) {
+        for(let i=0; i<=9; i++) document.getElementById(`bar-${i}`).style.width = (d[i]*100)+'%';
+    }
+</script>
+</body>
+</html>
